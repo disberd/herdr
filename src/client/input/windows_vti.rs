@@ -768,11 +768,17 @@ fn parse_win32_paste_record(report: &str) -> Option<WindowsKeyRecord> {
 
 fn decode_windows_terminal_paste_enters(text: &mut String) {
     const ENTER_REPORT_PAIR: &str = "\x1b[13;28;13;1;0;1_\x1b[13;28;13;0;0;1_";
+    const CTRL_LINE_FEED_REPORTS: &str =
+        "\x1b[17;29;0;1;8;1_\x1b[13;28;10;1;8;1_\x1b[13;28;10;0;8;1_\x1b[17;29;0;0;0;1_";
 
     // Windows Terminal can encode pasted newlines as an adjacent unmodified
-    // Enter press/release pair. Keep every other report-shaped payload opaque.
-    if text.contains(ENTER_REPORT_PAIR) {
-        *text = text.replace(ENTER_REPORT_PAIR, "\r");
+    // Enter press/release pair. A newer ConPTY under Rio encodes a pasted LF as
+    // left Ctrl down, Ctrl+Enter (unicode LF) press/release, Ctrl up. Keep every
+    // other report-shaped payload opaque.
+    for pattern in [ENTER_REPORT_PAIR, CTRL_LINE_FEED_REPORTS] {
+        if text.contains(pattern) {
+            *text = text.replace(pattern, "\r");
+        }
     }
 }
 
@@ -2305,6 +2311,25 @@ mod tests {
             translate(records),
             vec![crate::protocol::ClientInputEvent::Paste {
                 text: " - line one\r  - line two\r  - line three".into(),
+            }]
+        );
+    }
+
+    #[test]
+    fn vti_remote_bracketed_paste_decodes_ctrl_line_feed_records() {
+        let records = concat!(
+            "\x1b[200~Block A: plain prose",
+            "\x1b[17;29;0;1;8;1_\x1b[13;28;10;1;8;1_\x1b[13;28;10;0;8;1_\x1b[17;29;0;0;0;1_",
+            "\x1b[17;29;0;1;8;1_\x1b[13;28;10;1;8;1_\x1b[13;28;10;0;8;1_\x1b[17;29;0;0;0;1_",
+            "line two\x1b[201~",
+        )
+        .chars()
+        .map(key_char);
+
+        assert_eq!(
+            translate(records),
+            vec![crate::protocol::ClientInputEvent::Paste {
+                text: "Block A: plain prose\r\rline two".into(),
             }]
         );
     }

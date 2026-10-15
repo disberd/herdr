@@ -1,0 +1,87 @@
+# Fork-only: build the Windows x86_64 archive from any branch and publish it
+# as a GitHub prerelease on this fork. Upstream herdrdev/herdr skips it.
+name: Fork Windows release
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: branch, tag or commit to build
+        required: true
+        default: rio-paste-fix
+
+permissions:
+  contents: write
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  RUST_TOOLCHAIN_VERSION: 1.96.1
+
+jobs:
+  build:
+    if: github.repository != 'herdrdev/herdr'
+    runs-on: windows-latest
+    env:
+      LIBGHOSTTY_VT_OPTIMIZE: ReleaseFast
+      LIBGHOSTTY_VT_SIMD: 'true'
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # v1
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN_VERSION }}
+          targets: x86_64-pc-windows-msvc
+
+      - name: Install Zig
+        uses: vercel-labs/setup-zig@83c1594f26b86da8a9a8ddd9b5ee5f3af0f96943 # v1.0.2
+        with:
+          version: 0.16.0
+
+      - name: Cache Rust artifacts
+        uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
+        with:
+          key: fork-windows-x86_64
+
+      - name: Remove Zig caches
+        shell: pwsh
+        run: |
+          Remove-Item -Recurse -Force .zig-cache -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force vendor/libghostty-vt/.zig-cache -ErrorAction SilentlyContinue
+          Remove-Item -Recurse -Force vendor/libghostty-vt/zig-out -ErrorAction SilentlyContinue
+
+      - name: Build
+        run: cargo build --release --locked --target x86_64-pc-windows-msvc
+
+      - name: Package
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          .\scripts\package_windows_conpty.ps1 `
+            -HerdrExe target\x86_64-pc-windows-msvc\release\herdr.exe `
+            -PackagePath (Join-Path $env:RUNNER_TEMP "Microsoft.Windows.Console.ConPTY.nupkg") `
+            -StageDir (Join-Path $env:RUNNER_TEMP "herdr-windows-x86_64") `
+            -OutputPath herdr-windows-x86_64.zip
+          $hash = (Get-FileHash -Algorithm SHA256 herdr-windows-x86_64.zip).Hash.ToLowerInvariant()
+          "$hash  herdr-windows-x86_64.zip" | Out-File -Encoding ascii herdr-windows-x86_64.zip.sha256
+
+      - name: Publish prerelease
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REF: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          sha="$(git rev-parse HEAD)"
+          tag="win-${REF//\//-}-${sha:0:8}"
+          gh release delete "$tag" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" 2>/dev/null || true
+          gh release create "$tag" \
+            --repo "$GITHUB_REPOSITORY" \
+            --target "$sha" \
+            --prerelease \
+            --title "$tag" \
+            --notes "Windows x86_64 build of \`$REF\` at $sha." \
+            herdr-windows-x86_64.zip herdr-windows-x86_64.zip.sha256
